@@ -151,7 +151,7 @@ press_any_key()
 get_commit_message()
 {
 	pushd ${repo_root} > /dev/null
-	git log --pretty=%B -n 1 | tr '\n' ' ' | sed "s/[ ]*$//"
+	git log --pretty=%B -n 1 | xargs
 	popd > /dev/null
 }
 
@@ -212,6 +212,7 @@ GIT_BASICS=(
 	git_commit
 	git_branch
 	git_rebase
+	git_cherry_pick
 )
 
 #################
@@ -702,7 +703,6 @@ git_branch()
 	done
 }
 
-
 ##################
 # 1.4 git rebase #
 ##################
@@ -1052,6 +1052,413 @@ git_rebase()
 	done
 }
 
+#######################
+# 1.5 git cherry-pick #
+#######################
+
+generate_reverse_polish_notation_files()
+{
+	cat > tmp_includes_and_defines << EOF
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#define MAX_ARGS 100
+
+void help_text(char *name)
+{
+	printf("Usage: %s <expression in reverse Polish notation>\n", name);
+	printf("Examples:\n");
+	printf("    %s 5 2 +\n", name);
+	printf("    %s 5 2 \\\\* 3 +\n", name);
+	printf("    %s 5 2 - 3 + 1 +\n", name);
+	printf("    %s 5 2 / 2 3 + \\\\*\n", name);
+}
+
+EOF
+	cat > tmp_addition_function << EOF
+int add(int a, int b)
+{
+	return a + b;
+}
+
+EOF
+	cat > tmp_subtraction_function << EOF
+int subtract(int a, int b)
+{
+	return a - b;
+}
+
+EOF
+	cat > tmp_multiplication_function << EOF
+int multiply(int a, int b)
+{
+	return a*b;
+}
+
+EOF
+	cat > tmp_division_function << EOF
+int divide(int a, int b)
+{
+	return a/b;
+}
+
+EOF
+	cat > tmp_main_top << EOF
+int main(int argc, char **argv)
+{
+	int stack[MAX_ARGS] = {0, };
+	int stack_index = -1;
+	int i;
+
+	if (argc < 2) {
+		help_text(argv[0]);
+		return 1;
+	}
+
+	for (i = 1; i < argc; ++i) {
+		stack[++stack_index] = atoi(argv[i]);
+		if (stack[stack_index] == 0 && strcmp(argv[i], "0")) {
+			--stack_index;
+			if (stack_index < 1) {
+				printf("Invalid expression!\n");
+				return 2;
+			}
+			switch(argv[i][0]) {
+EOF
+	cat > tmp_addition_case << EOF
+				case '+':
+					--stack_index;
+					stack[stack_index] = add(stack[stack_index], stack[stack_index + 1]);
+					break;
+EOF
+	cat > tmp_subtraction_case << EOF
+				case '-':
+					--stack_index;
+					stack[stack_index] = subtract(stack[stack_index], stack[stack_index + 1]);
+					break;
+EOF
+	cat > tmp_multiplication_case << EOF
+				case '*':
+					--stack_index;
+					stack[stack_index] = multiply(stack[stack_index], stack[stack_index + 1]);
+					break;
+EOF
+	cat > tmp_division_case << EOF
+				case '/':
+					if (!stack[stack_index]) {
+						printf("Division by 0 is extremly forbidden!\n");
+						return 3;
+					}
+
+					--stack_index;
+					stack[stack_index] = divide(stack[stack_index], stack[stack_index + 1]);
+					break;
+EOF
+	cat > tmp_switch_not_implemented << EOF
+				default:
+					printf("Operation %c is not yet implemented!\n", argv[i][0]);
+					return 0;
+EOF
+	cat > tmp_main_bottom << EOF
+			}
+		}
+	}
+
+	if (stack_index) {
+		printf("Invalid expression!\n");
+		return 2;
+	}
+
+	printf("%d\n", stack[0]);
+	return 0;
+}
+EOF
+}
+
+git_cherry_pick_prepare()
+{
+	pushd ${repo_root} > /dev/null
+
+	git checkout -q master
+	if [ -n "${cherry_pick_git_sha}" ]
+	then
+		git reset -q --hard ${cherry_pick_git_sha}
+	fi
+
+	branches=($( git branch | sed "s/*//g" ))
+	for b in ${branches[*]}
+	do
+		if [[ "${b}" == "master" ]]; then continue; fi
+
+		git branch -q -D ${b}
+	done
+
+	rm -f ./*
+	git add .
+	git commit -m "Cleaning for cherry-pick lesson" > /dev/null
+
+	cherry_pick_git_sha="$( git log --pretty=%H | head -1 )"
+
+	generate_reverse_polish_notation_files
+
+	cat tmp_includes_and_defines tmp_main_top tmp_switch_not_implemented tmp_main_bottom > rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Base for reverse Polish notation calculator added" > /dev/null
+
+	git checkout -q -b feature_addition
+	cat tmp_includes_and_defines tmp_addition_function tmp_main_top tmp_addition_case tmp_switch_not_implemented tmp_main_bottom > rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Addition feature added to calculator" > /dev/null
+
+	git checkout -q master
+	git checkout -q -b feature_subtraction
+	cat tmp_includes_and_defines tmp_subtraction_function tmp_main_top tmp_subtraction_case tmp_switch_not_implemented tmp_main_bottom > rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Subtraction feature added to calculator" > /dev/null
+
+	git checkout -q master
+	git checkout -q -b feature_multiplication
+	cat tmp_includes_and_defines tmp_multiplication_function tmp_main_top tmp_multiplication_case tmp_switch_not_implemented tmp_main_bottom > rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Multiplication feature added to calculator" > /dev/null
+
+	git checkout -q master
+	git checkout -q -b feature_division
+	cat tmp_includes_and_defines tmp_division_function tmp_main_top tmp_division_case tmp_switch_not_implemented tmp_main_bottom > rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Division feature added to calculator" > /dev/null
+
+	git checkout -q master
+
+	rm -f ./tmp_*
+	popd > /dev/null
+}
+
+git_cherry_pick_clean()
+{
+	git_cherry_pick_prepare
+}
+
+git_cherry_pick_hint()
+{
+	hint "git log [branch]"
+	hint "git cherry-pick [branch|git sha]"
+	hint "gcc -o calc rpn_calculator.c"
+	hint "./calc 5 2 \\* 8 2 / + 4 -"
+}
+
+git_cherry_pick_solution()
+{
+	pushd ${repo_root} > /dev/null
+	git checkout -q master
+	git checkout -q -b complete
+	git cherry-pick feature_addition > /dev/null
+	popd > /dev/null
+}
+
+git_cherry_pick_2_prepare()
+{
+	git_cherry_pick_prepare
+	git_cherry_pick_solution
+}
+
+git_cherry_pick_2_clean()
+{
+	git_cherry_pick_2_prepare
+}
+
+git_cherry_pick_2_hint()
+{
+	hint "git log [branch]"
+	hint "git cherry-pick [branch]"
+	hint "gcc -o calc rpn_calculator.c"
+}
+
+git_cherry_pick_2_solution()
+{
+	pushd ${repo_root} > /dev/null
+
+	generate_reverse_polish_notation_files
+
+	cat tmp_includes_and_defines tmp_addition_function tmp_subtraction_function > rpn_calculator.c
+	cat tmp_main_top tmp_addition_case tmp_subtraction_case tmp_switch_not_implemented tmp_main_bottom >> rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Subtraction feature added to calculator" > /dev/null
+
+	cat tmp_includes_and_defines tmp_addition_function tmp_subtraction_function > rpn_calculator.c
+	cat tmp_multiplication_function tmp_main_top tmp_addition_case tmp_subtraction_case >> rpn_calculator.c
+	cat tmp_multiplication_case tmp_switch_not_implemented tmp_main_bottom >> rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Multiplication feature added to calculator" > /dev/null
+
+	cat tmp_includes_and_defines tmp_addition_function tmp_subtraction_function > rpn_calculator.c
+	cat tmp_multiplication_function tmp_division_function tmp_main_top tmp_addition_case >> rpn_calculator.c
+	cat tmp_subtraction_case tmp_multiplication_case tmp_division_case tmp_switch_not_implemented tmp_main_bottom >> rpn_calculator.c
+	git add rpn_calculator.c
+	git commit -m "Division feature added to calculator" > /dev/null
+
+	rm -f ./tmp_*
+	popd > /dev/null
+}
+
+git_cherry_pick_3_prepare()
+{
+	git_cherry_pick_2_prepare
+	git_cherry_pick_2_solution
+}
+
+git_cherry_pick_3_clean()
+{
+	git_cherry_pick_3_prepare
+}
+
+git_cherry_pick_3_hint()
+{
+	git_cherry_pick_hint
+}
+
+git_cherry_pick_3_solution()
+{
+	pushd ${repo_root} > /dev/null
+
+	git_cherry_pick_3_prepare
+	git reset --soft HEAD~4
+	git commit -m "Adding basic math operations to calculator"
+
+	popd > /dev/null
+}
+
+calculator_build_solution()
+{
+	return
+}
+
+calculator_build_clean()
+{
+	git_cherry_pick_clean
+}
+
+calculator_build_hint()
+{
+	hint "gcc -o calc rpn_calculator.c"
+	hint "./calc 5 2 \\* 8 2 / + 4 -"
+}
+
+git_cherry_pick()
+{
+	print_lesson_title "Cherry-pick, merge conflicts and interactive rebase"
+
+	print_text_block "Finally, you are ready for something more complex."
+	print_text_block "I've cleaned your repository and added rpn_calculator.c file." \
+		"Reverse Polish notation calculator is super cool way to calculate" \
+		"anything and everything. If you do not know what reverse Polish" \
+		"notation is, jfgi. Try to build app and test it."
+
+	git_cherry_pick_prepare
+
+	press_any_key calculator_build
+
+	while [ 1 ]
+	do
+		print_text_block "As you can see, math operations are still not" \
+			"implemented, at least not on master branch."
+		print_text_block "There are four colleagues in team and each of them" \
+			"implemented one operation. For start, make a new branch from" \
+			"master branch, then cherry-pick implementation of addition" \
+			"functionality using 'git cherry-pick [branch|git sha]'."
+
+		press_any_key git_cherry_pick
+
+		pushd ${repo_root} > /dev/null
+		u_branch="$( get_current_branch )"
+		calc_result="$( gcc -o ./calc rpn_calculator.c; ./calc 5 2 + )"
+		popd > /dev/null
+
+		if [[ "${u_branch}" == "master" ]]
+		then
+			task_fail "Make your own branch"
+			continue
+		elif [[ "7" != "${calc_result}" ]]
+		then
+			task_fail "Cherry-pick addition functionality"
+			continue
+		fi
+
+		task_pass "Addition works now"
+		break
+	done
+
+	while [ 1 ]
+	do
+		print_text_block "That was easy enough, now try to cherry-pick the rest" \
+			"of features. Since all team members worked on same file and" \
+			"similar lines, you'll have merge conflicts. After each cherry-pick" \
+			"you'll need to resolve merge conflicts and finish cherry-pick" \
+			"process using 'git cherry-pick --continue'."
+
+		press_any_key git_cherry_pick_2
+
+		pushd ${repo_root} > /dev/null
+		calc_result="$( gcc -o ./calc rpn_calculator.c; ./calc 5 2 \* 8 2 / + 4 - )"
+		popd > /dev/null
+
+		if [[ "10" != "${calc_result}" ]]
+		then
+			task_fail "Fix merge conflicts"
+			continue
+		fi
+
+		task_pass "Calculator is complete!"
+		break
+	done
+
+	while [ 1 ]
+	do
+		print_text_block "Now when calculator works properly, there's one more" \
+			"thing left to do. Team decided that all features will be merged" \
+			"as one commit, so we need to squash last four commits together." \
+			"With interactive rebase you can change the order of commits," \
+			"remove commits or squash multiple commits to one."
+		print_text_block "Feel free to checkout your current branch state to a" \
+			"new branch and delete one of the calculator features using" \
+			"interactive rebase. When you are done, just move back to the" \
+			"current branch."
+		print_text_block "To complete this task, we need to squash last 4" \
+			"commits, so you can use 'git rebase -i HEAD~4'. For bottom (last)" \
+			"3 commits change word \"pick\" to \"s\" or \"squash\" and save" \
+			"the file. After that, git will automatically edit commit message" \
+			"as combination of all commit messages with additional comments." \
+			"Replace generated commit message with \"Adding basic math" \
+			"operations to calculator\"."
+
+		press_any_key git_cherry_pick_3
+
+		pushd ${repo_root} > /dev/null
+		calc_result="$( gcc -o ./calc rpn_calculator.c; ./calc 5 2 \* 8 2 / + 4 - )"
+		u_comm_msg=$( get_commit_message )
+		prev_comm_msg="$( git log --pretty=%B -n 1 HEAD^ | xargs )"
+		popd > /dev/null
+
+		if [[ "10" != "${calc_result}" ]]
+		then
+			task_fail "Calculator does not work anymore!"
+			continue
+		elif [[ "Base for reverse Polish notation calculator added" != "${prev_comm_msg}" ]]
+		then
+			task_fail "You didn't squash all commits"
+			continue
+		elif [[ "Adding basic math operations to calculator" != "${u_comm_msg}" ]]
+		then
+			task_fail "Wrong commit message"
+			continue
+		fi
+
+		task_pass "Calculator is ready to be merged"
+		break
+
+	done
+}
 
 ########
 # Main #
@@ -1068,3 +1475,4 @@ do
 done
 
 congratulations
+
